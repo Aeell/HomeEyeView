@@ -11,28 +11,117 @@ from pathlib import Path
 import glob
 import shutil
 
-# Try to import Raspberry Pi specific libraries
+# Safe import for Raspberry Pi specific libraries
 try:
     import RPi.GPIO as GPIO
     RPI_AVAILABLE = True
-except ImportError:
+except Exception:  # Catch RuntimeError and other exceptions
     RPI_AVAILABLE = False
     print("Running in development mode - Raspberry Pi libraries not available")
+    # Create dummy GPIO class for development
+    class DummyGPIO:
+        BCM = 11
+        IN = 1
+        RISING = 31
+        def setmode(self, *args, **kwargs): pass
+        def setup(self, *args, **kwargs): pass
+        def add_event_detect(self, *args, **kwargs): pass
+        def cleanup(self, *args, **kwargs): pass
+    GPIO = DummyGPIO()
 
 try:
     from picamera2 import Picamera2
     PICAMERA_AVAILABLE = True
-except ImportError:
+except Exception:  # Catch all exceptions for broader compatibility
     PICAMERA_AVAILABLE = False
-    print("picamera2 not available - using OpenCV camera fallback")
+    print("picamera2 not available - using camera fallback")
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SESSION_SECRET', 'dev-secret-key')
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+class CameraAdapter:
+    """Base camera adapter interface"""
+    def get_frame(self):
+        raise NotImplementedError
+    
+    def release(self):
+        pass
+    
+    def is_bgr_format(self):
+        """Returns True if frames are in BGR format, False if RGB"""
+        return False
+
+class PiCameraAdapter(CameraAdapter):
+    def __init__(self):
+        self.camera = Picamera2()
+        config = self.camera.create_video_configuration(
+            main={"size": (1920, 1080), "format": "RGB888"}
+        )
+        self.camera.configure(config)
+        self.camera.start()
+        print("Picamera2 initialized successfully")
+    
+    def get_frame(self):
+        return self.camera.capture_array()
+    
+    def is_bgr_format(self):
+        return False  # PiCamera returns RGB
+    
+    def release(self):
+        if self.camera:
+            self.camera.stop()
+
+class OpenCVCameraAdapter(CameraAdapter):
+    def __init__(self):
+        self.camera = cv2.VideoCapture(0)
+        if self.camera.isOpened():
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            self.camera.set(cv2.CAP_PROP_FPS, 30)
+            print("OpenCV camera initialized successfully")
+        else:
+            raise Exception("Failed to open camera")
+    
+    def get_frame(self):
+        ret, frame = self.camera.read()
+        return frame if ret else None
+    
+    def is_bgr_format(self):
+        return True  # OpenCV returns BGR
+    
+    def release(self):
+        if self.camera:
+            self.camera.release()
+
+class SyntheticCameraAdapter(CameraAdapter):
+    def __init__(self):
+        self.frame_count = 0
+        print("Synthetic camera initialized for development")
+    
+    def get_frame(self):
+        # Generate a synthetic frame with timestamp
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        frame[:, :] = [64, 128, 64]  # Dark green background
+        
+        # Add timestamp text
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cv2.putText(frame, f"Development Mode - {timestamp}", 
+                   (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
+        cv2.putText(frame, "Synthetic Camera Feed", 
+                   (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2)
+        cv2.putText(frame, f"Frame: {self.frame_count}", 
+                   (50, 300), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        
+        self.frame_count += 1
+        return frame
+    
+    def is_bgr_format(self):
+        return True  # Synthetic frames are BGR (OpenCV format)
+
 class SurveillanceSystem:
     def __init__(self):
-        self.camera = None
+        self.camera_adapter = None
         self.is_recording = False
         self.recording_thread = None
         self.motion_detection_enabled = False
@@ -62,30 +151,22 @@ class SurveillanceSystem:
             self.init_pir_sensor()
     
     def init_camera(self):
-        """Initialize camera system"""
+        """Initialize camera system with adapter factory"""
         try:
             if PICAMERA_AVAILABLE:
-                self.camera = Picamera2()
-                config = self.camera.create_video_configuration(
-                    main={"size": (1920, 1080), "format": "RGB888"}
-                )
-                self.camera.configure(config)
-                self.camera.start()
-                print("Picamera2 initialized successfully")
+                self.camera_adapter = PiCameraAdapter()
             else:
-                # Fallback to OpenCV camera (for development)
-                self.camera = cv2.VideoCapture(0)
-                if self.camera.isOpened():
-                    self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-                    self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-                    self.camera.set(cv2.CAP_PROP_FPS, 30)
-                    print("OpenCV camera initialized successfully")
-                else:
-                    print("Failed to initialize camera")
+                try:
+                    # Try OpenCV camera first
+                    self.camera_adapter = OpenCVCameraAdapter()
+                except Exception:
+                    # Fall back to synthetic camera for development
+                    self.camera_adapter = SyntheticCameraAdapter()
                     
         except Exception as e:
             print(f"Camera initialization error: {e}")
-            self.camera = None
+            # Use synthetic camera as final fallback
+            self.camera_adapter = SyntheticCameraAdapter()
     
     def init_pir_sensor(self):
         """Initialize PIR motion sensor"""
@@ -107,13 +188,8 @@ class SurveillanceSystem:
     def get_frame(self):
         """Capture a frame from the camera"""
         try:
-            if PICAMERA_AVAILABLE and self.camera:
-                frame = self.camera.capture_array()
-                return frame
-            elif self.camera and self.camera.isOpened():
-                ret, frame = self.camera.read()
-                if ret:
-                    return frame
+            if self.camera_adapter:
+                return self.camera_adapter.get_frame()
         except Exception as e:
             print(f"Frame capture error: {e}")
         return None
@@ -156,9 +232,12 @@ class SurveillanceSystem:
             while self.is_recording:
                 frame = self.get_frame()
                 if frame is not None:
-                    if len(frame.shape) == 3 and frame.shape[2] == 3:
+                    # Handle color space conversion based on camera adapter
+                    if self.camera_adapter and not self.camera_adapter.is_bgr_format():
+                        # Convert RGB to BGR for video writer
                         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                     else:
+                        # Frame is already in BGR format
                         frame_bgr = frame
                     out.write(frame_bgr)
                 
@@ -193,17 +272,20 @@ class SurveillanceSystem:
             if setting in self.camera_settings:
                 self.camera_settings[setting] = value
                 
-                if PICAMERA_AVAILABLE and self.camera:
-                    # Apply settings to picamera2
+                # Apply settings to Pi camera if available
+                if (PICAMERA_AVAILABLE and 
+                    isinstance(self.camera_adapter, PiCameraAdapter) and 
+                    hasattr(self.camera_adapter.camera, 'set_controls')):
+                    
                     if setting == 'brightness':
-                        self.camera.set_controls({"Brightness": float(value)})
+                        self.camera_adapter.camera.set_controls({"Brightness": float(value)})
                     elif setting == 'contrast':
-                        self.camera.set_controls({"Contrast": float(value)})
+                        self.camera_adapter.camera.set_controls({"Contrast": float(value)})
                     elif setting == 'white_balance':
                         if value == 'auto':
-                            self.camera.set_controls({"AwbEnable": True})
+                            self.camera_adapter.camera.set_controls({"AwbEnable": True})
                         else:
-                            self.camera.set_controls({"AwbEnable": False})
+                            self.camera_adapter.camera.set_controls({"AwbEnable": False})
                     # Add more camera control mappings as needed
                 
                 return True, f"Updated {setting} to {value}"
@@ -286,7 +368,7 @@ def index():
 @app.route('/api/status')
 def get_status():
     return jsonify({
-        'camera_available': surveillance.camera is not None,
+        'camera_available': surveillance.camera_adapter is not None,
         'is_recording': surveillance.is_recording,
         'motion_detection': surveillance.motion_detection_enabled,
         'settings': surveillance.camera_settings,
@@ -349,15 +431,33 @@ def handle_frame_request():
     """Handle video frame streaming via WebSocket"""
     frame = surveillance.get_frame()
     if frame is not None:
+        # Handle color space for streaming
+        if surveillance.camera_adapter and not surveillance.camera_adapter.is_bgr_format():
+            # Convert RGB to BGR for JPEG encoding
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        else:
+            # Frame is already in BGR format
+            frame_bgr = frame
+            
         # Encode frame to JPEG for streaming
-        _, buffer = cv2.imencode('.jpg', cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        _, buffer = cv2.imencode('.jpg', frame_bgr)
         frame_data = buffer.tobytes()
         emit('video_frame', {'data': frame_data.hex()})
+
+# Development endpoint for motion simulation
+@app.route('/api/dev/simulate-motion', methods=['POST'])
+def simulate_motion():
+    """Development-only endpoint to simulate motion detection"""
+    if not RPI_AVAILABLE:  # Only available in development mode
+        surveillance.motion_detected(None)
+        return jsonify({'success': True, 'message': 'Motion simulation triggered'})
+    else:
+        return jsonify({'success': False, 'message': 'Not available on Pi hardware'}), 403
 
 # Start frame streaming in background
 def stream_frames():
     while True:
-        if surveillance.camera:
+        if surveillance.camera_adapter:
             socketio.emit('heartbeat', {'timestamp': datetime.now().isoformat()})
         time.sleep(0.1)  # 10 FPS for streaming
 
@@ -367,11 +467,12 @@ streaming_thread.start()
 
 if __name__ == '__main__':
     try:
-        socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+        socketio.run(app, host='0.0.0.0', port=5000, debug=False, 
+                    use_reloader=False, log_output=True)
     except KeyboardInterrupt:
         print("Shutting down surveillance system...")
     finally:
         if RPI_AVAILABLE:
             GPIO.cleanup()
-        if surveillance.camera and hasattr(surveillance.camera, 'release'):
-            surveillance.camera.release()
+        if surveillance.camera_adapter and hasattr(surveillance.camera_adapter, 'release'):
+            surveillance.camera_adapter.release()
