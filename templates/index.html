@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raspberry Pi Surveillance System</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>🏠 Surveillance System</h1>
+            <div class="status-indicators">
+                <span class="status-item" id="camera-status">
+                    <span class="indicator" id="camera-indicator"></span>
+                    Camera: <span id="camera-text">Offline</span>
+                </span>
+                <span class="status-item" id="recording-status">
+                    <span class="indicator" id="recording-indicator"></span>
+                    Recording: <span id="recording-text">Stopped</span>
+                </span>
+                <span class="status-item" id="motion-status">
+                    <span class="indicator" id="motion-indicator"></span>
+                    Motion Detection: <span id="motion-text">Disabled</span>
+                </span>
+            </div>
+        </header>
+
+        <!-- Main Content Area -->
+        <div class="main-content">
+            <!-- Left Panel: File Browser -->
+            <div class="left-panel">
+                <div class="panel-header">
+                    <h3>📁 Recorded Videos</h3>
+                    <button id="refresh-videos" class="btn btn-small">🔄 Refresh</button>
+                </div>
+                
+                <!-- Storage Info -->
+                <div class="storage-info">
+                    <div class="storage-bar">
+                        <div class="storage-used" style="width: 35%"></div>
+                    </div>
+                    <small>Storage: 7.2GB / 20GB used</small>
+                </div>
+
+                <!-- Auto-Delete Settings -->
+                <div class="auto-delete-section">
+                    <label for="auto-delete-select">Auto-delete after:</label>
+                    <select id="auto-delete-select" class="form-control">
+                        <option value="1">1 Day</option>
+                        <option value="3">3 Days</option>
+                        <option value="7" selected>1 Week</option>
+                        <option value="14">2 Weeks</option>
+                        <option value="30">1 Month</option>
+                        <option value="60">2 Months</option>
+                        <option value="90">3 Months</option>
+                        <option value="180">6 Months</option>
+                        <option value="365">1 Year</option>
+                    </select>
+                    <button id="cleanup-old" class="btn btn-warning btn-small">🗑️ Cleanup Old</button>
+                </div>
+
+                <!-- Video File Browser -->
+                <div class="file-browser" id="file-browser">
+                    <div class="loading">Loading videos...</div>
+                </div>
+            </div>
+
+            <!-- Right Panel: Camera Feed and Controls -->
+            <div class="right-panel">
+                <!-- Video Feed Area -->
+                <div class="video-section">
+                    <div class="video-container" id="video-container">
+                        <canvas id="video-canvas" width="640" height="480"></canvas>
+                        <div class="video-overlay">
+                            <div class="video-controls">
+                                <button id="enlarge-video" class="btn-overlay">🔍 Enlarge</button>
+                                <button id="fullscreen-video" class="btn-overlay">⛶ Fullscreen</button>
+                            </div>
+                            <div class="video-info">
+                                <span id="video-resolution">1920x1080</span>
+                                <span id="video-fps">30 FPS</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Recording Controls -->
+                <div class="control-section">
+                    <h3>📹 Recording Controls</h3>
+                    <div class="recording-controls">
+                        <button id="start-recording" class="btn btn-primary">🔴 Start Recording</button>
+                        <button id="stop-recording" class="btn btn-secondary" disabled>⏹️ Stop Recording</button>
+                        <button id="toggle-motion" class="btn btn-outline">📡 Enable Motion Detection</button>
+                    </div>
+                    
+                    <div class="recording-settings">
+                        <label for="recording-duration">Recording Duration (seconds):</label>
+                        <input type="number" id="recording-duration" class="form-control" value="180" min="10" max="3600">
+                    </div>
+                </div>
+
+                <!-- Camera Settings -->
+                <div class="control-section">
+                    <h3>⚙️ Camera Settings</h3>
+                    <div class="camera-settings">
+                        <div class="setting-group">
+                            <label for="brightness-slider">Brightness:</label>
+                            <input type="range" id="brightness-slider" class="slider" min="-100" max="100" value="0">
+                            <span class="slider-value" id="brightness-value">0</span>
+                        </div>
+
+                        <div class="setting-group">
+                            <label for="contrast-slider">Contrast:</label>
+                            <input type="range" id="contrast-slider" class="slider" min="0" max="2" step="0.1" value="1.0">
+                            <span class="slider-value" id="contrast-value">1.0</span>
+                        </div>
+
+                        <div class="setting-group">
+                            <label for="zoom-slider">Zoom:</label>
+                            <input type="range" id="zoom-slider" class="slider" min="1" max="4" step="0.1" value="1.0">
+                            <span class="slider-value" id="zoom-value">1.0x</span>
+                        </div>
+
+                        <div class="setting-group">
+                            <label for="white-balance">White Balance:</label>
+                            <select id="white-balance" class="form-control">
+                                <option value="auto" selected>Auto</option>
+                                <option value="daylight">Daylight</option>
+                                <option value="cloudy">Cloudy</option>
+                                <option value="tungsten">Tungsten</option>
+                                <option value="fluorescent">Fluorescent</option>
+                            </select>
+                        </div>
+
+                        <div class="setting-group">
+                            <label for="exposure-mode">Exposure Mode:</label>
+                            <select id="exposure-mode" class="form-control">
+                                <option value="auto" selected>Auto</option>
+                                <option value="manual">Manual</option>
+                                <option value="night">Night</option>
+                                <option value="sports">Sports</option>
+                                <option value="portrait">Portrait</option>
+                            </select>
+                        </div>
+
+                        <div class="setting-group">
+                            <label for="focus-mode">Focus Mode:</label>
+                            <select id="focus-mode" class="form-control">
+                                <option value="auto" selected>Auto Focus</option>
+                                <option value="infinity">Infinity</option>
+                                <option value="macro">Macro</option>
+                                <option value="manual">Manual</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Video Player Modal -->
+    <div id="video-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-video-title">Video Player</h3>
+                <span class="modal-close" id="close-modal">&times;</span>
+            </div>
+            <div class="modal-body">
+                <video id="modal-video-player" controls width="100%">
+                    Your browser does not support the video tag.
+                </video>
+                <div class="video-details">
+                    <p><strong>File:</strong> <span id="modal-video-filename"></span></p>
+                    <p><strong>Duration:</strong> <span id="modal-video-duration"></span></p>
+                    <p><strong>Size:</strong> <span id="modal-video-size"></span></p>
+                    <p><strong>Created:</strong> <span id="modal-video-created"></span></p>
+                </div>
+                <div class="modal-actions">
+                    <button id="open-external" class="btn btn-primary">📱 Open in External Player</button>
+                    <button id="download-video" class="btn btn-secondary">💾 Download</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Fullscreen Video Container -->
+    <div id="fullscreen-container" class="fullscreen-container">
+        <canvas id="fullscreen-canvas"></canvas>
+        <button id="exit-fullscreen" class="btn-overlay exit-btn">❌ Exit</button>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
